@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Base Blasters — Number Systems Arcade (Prototype)</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#0e1530; --border:#26324d; --text:#eef4ff;
+    --accent:#58a6ff; --good:#2ea043; --bad:#ef4444; --warn:#f59e0b; --muted:#a9b4c9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:radial-gradient(1200px 800px at 20% -10%, #132042, var(--bg) 60%);
+       font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  header{
+    display:flex; gap:.75rem; align-items:center; flex-wrap:wrap;
+    padding:10px 14px; background:linear-gradient(180deg,#0d1734,#0a1227);
+    border-bottom:1px solid var(--border); color:var(--text);
+    position:sticky; top:0; z-index:5;
+  }
+  header .title{font-weight:700; letter-spacing:.5px}
+  select,button,input[type="checkbox"]{background:#0e1a3a; color:var(--text);
+    border:1px solid var(--border); border-radius:10px; padding:8px 10px}
+  button{cursor:pointer}
+  .pill{padding:.35rem .6rem; border:1px solid var(--border); border-radius:999px;
+        background:#0b1431; color:var(--muted);}
+  #wrap{display:grid; place-items:center; padding:14px}
+  canvas{background:linear-gradient(#020611,#091229);
+         border:1px solid var(--border); border-radius:16px; box-shadow:0 10px 30px rgba(0,0,0,.35);
+         image-rendering:pixelated}
+  footer{color:#93a3c6; text-align:center; padding:10px 0 20px}
+  details{max-width:960px; margin:10px auto 0; color:#c9d6ff}
+  summary{cursor:pointer}
+</style>
+</head>
+<body>
+  <header>
+    <div class="title">🚀 <span>Base Blasters</span></div>
+    <label class="pill">Mode
+      <select id="mode">
+        <option value="classic">Classic — Base Conversions</option>
+        <option value="ipv4">IPv4 — 8‑bit Octets → Binary</option>
+        <option value="ipv6">IPv6 — Hex Quartet → 16‑bit Binary</option>
+      </select>
+    </label>
+    <button id="start">Start</button>
+    <button id="pause">Pause</button>
+    <button id="restart">Restart</button>
+    <span class="pill">Controls: ← → move, Space shoot, P pause, R restart, H help</span>
+  </header>
+
+  <div id="wrap">
+    <canvas id="game" width="960" height="600" aria-label="Base Blasters Game Canvas"></canvas>
+  </div>
+
+  <details>
+    <summary>About this prototype + teaching links</summary>
+    <div style="padding:8px 2px 14px;">
+      <p><strong>Classic mode</strong> cycles bases 2 (binary), 8 (octal), 12 (duodecimal), 16 (hex). Shoot the correct conversion for the shown decimal number.</p>
+      <p><strong>IPv4 mode:</strong> Given an address like 192.168.1.5, you’ll be asked for the 8‑bit binary of a random octet.</p>
+      <p><strong>IPv6 mode:</strong> Given a hex quartet (4 hex digits), shoot the matching 16‑bit binary. This builds intuition for how IPv6 uses hex as compact binary.</p>
+      <p>Difficulty ramps by increasing number ranges and invader speed. Streaks grant score multipliers. Wrong shots cost a shield.</p>
+    </div>
+  </details>
+
+  <footer>© Prototype for classroom use. No external libs. </footer>
+
+<script>
+(() => {
+  // ---------- Canvas & Context ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  // ---------- UI Elements ----------
+  const $mode = document.getElementById('mode');
+  const $start = document.getElementById('start');
+  const $pause = document.getElementById('pause');
+  const $restart = document.getElementById('restart');
+
+  // ---------- Game State ----------
+  let state = 'menu'; // 'menu' | 'playing' | 'paused' | 'gameover'
+  let mode = 'classic';
+  let last = 0; // last timestamp
+  let dt = 0; // delta
+
+  const keys = { left:false, right:false, shoot:false };
+
+  const player = {
+    x: W/2, y: H-64, w: 56, h: 24, speed: 360,
+    cooldown: 0, cooldownMax: 0.25
+  };
+
+  let bullets = []; // {x,y,w,h,vy}
+  let aliens = [];  // {x,y,w,h,vy,text,correct,base}
+
+  let score = 0, lives = 3, level = 1, streak = 0, target = 0;
+  let baseTarget = 2; // 2, 8, 12, 16 (classic) or special in ip modes
+  let roundText = '';
+  let messageFlash = 0; // for on-hit feedback
+
+  // ---------- Helpers ----------
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  function randInt(min, max){ return Math.floor(Math.random()*(max-min+1))+min; }
+
+  function toBase(n, base){
+    if (base < 2 || base > 16) throw new Error('Base out of range');
+    if (n === 0) return '0';
+    let digits = '0123456789ABCDEF';
+    let s = '';
+    let x = Math.floor(Math.abs(n));
+    while (x > 0) {
+      const d = x % base;
+      s = digits[d] + s;
+      x = Math.floor(x / base);
+    }
+    return s;
+  }
+
+  function toBaseDuodecimal(n){ // base-12 with A=10, B=11
+    if (n === 0) return '0';
+    let digits = '0123456789AB';
+    let s = '';
+    let x = Math.floor(Math.abs(n));
+    while (x > 0) {
+      const d = x % 12;
+      s = digits[d] + s;
+      x = Math.floor(x / 12);
+    }
+    return s;
+  }
+
+  function toPaddedBinary(n, bits){
+    let b = (n >>> 0).toString(2);
+    if (b.length > bits) b = b.slice(-bits);
+    while (b.length < bits) b = '0' + b;
+    return b;
+  }
+
+  function hexQuartet(){ // 0..0xFFFF -> 4 hex chars
+    const v = randInt(0, 0xFFFF);
+    let h = v.toString(16).toUpperCase();
+    while (h.length < 4) h = '0' + h;
+    return {hex:h, val:v};
+  }
+
+  function randIP(){ // basic classroom-friendly private ranges
+    const r = () => randInt(0,255);
+    const octets = [192,168,r(),r()];
+    return octets.join('.')
+  }
+
+  function splitOctets(ip){ return ip.split('.').map(x=>+x); }
+
+  function measureAlien(text){
+    ctx.save();
+    ctx.font = '20px Consolas, Menlo, Monaco, monospace';
+    const w = ctx.measureText(text).width + 24; // padding
+    ctx.restore();
+    return { w: Math.max(60, w), h: 36 };
+  }
+
+  function makeDecoys(correctText, count, base){
+    const decoys = new Set();
+    const chars = (base===12) ? '0123456789AB' : '0123456789ABCDEF'.slice(0, base);
+    const L = correctText.length;
+    let safety=0;
+    while (decoys.size < count && safety < 200){
+      safety++;
+      let arr = correctText.split('');
+      // mutate 1-2 positions
+      const changes = Math.random()<0.6 ? 1 : 2;
+      for(let i=0;i<changes;i++){
+        const pos = randInt(0, L-1);
+        let c;
+        do { c = chars[randInt(0, chars.length-1)]; } while (c === arr[pos]);
+        arr[pos] = c;
+      }
+      let s = arr.join('');
+      if (s !== correctText) decoys.add(s);
+    }
+    return [...decoys];
+  }
+
+  function resetGame(){
+    state = 'menu';
+    score = 0; lives = 3; level = 1; streak = 0; messageFlash = 0;
+    bullets.length = 0; aliens.length = 0; target = 0; roundText='';
+  }
+
+  function startGame(){
+    state = 'playing'; level = 1; score = 0; lives = 3; streak = 0;
+    bullets.length = 0; aliens.length = 0; newRound();
+  }
+
+  function gameOver(){ state = 'gameover'; }
+
+  function nextLevel(){ level++; newRound(); }
+
+  function classicRange(){
+    // scale difficulty: expand range with level
+    if (level < 4) return {min:0, max:63};
+    if (level < 7) return {min:0, max:255};
+    return {min:0, max:4095};
+  }
+
+  function pickBase(){
+    const bases = [2,8,12,16];
+    return bases[(level + Math.floor(Math.random()*10)) % bases.length];
+  }
+
+  function labelForBase(b){
+    if (b===2) return 'BINARY';
+    if (b===8) return 'OCTAL';
+    if (b===12) return 'DUODECIMAL';
+    if (b===16) return 'HEX';
+    return '';
+  }
+
+  function convertForBase(n,b){
+    if (b===12) return toBaseDuodecimal(n);
+    return toBase(n,b);
+  }
+
+  function waveSpeed(){ return 20 + level*6; }
+
+  function newRound(){
+    bullets.length = 0; aliens.length = 0; messageFlash = 0;
+    mode = $mode.value;
+
+    if (mode === 'classic'){
+      const {min,max} = classicRange();
+      target = randInt(min, max);
+      baseTarget = pickBase();
+      const correct = convertForBase(target, baseTarget);
+      const decoys = makeDecoys(correct, 5, baseTarget);
+
+      roundText = `Convert ${target} to ${labelForBase(baseTarget)}`;
+      spawnAliens([correct, ...decoys], baseTarget);
+    }
+    else if (mode === 'ipv4'){
+      const ip = randIP();
+      const octs = splitOctets(ip);
+      const idx = randInt(0,3);
+      target = { ip, idx };
+      baseTarget = 2; // binary 8-bit
+      const correct = toPaddedBinary(octs[idx], 8);
+      const decoys = makeDecoys(correct, 5, 2).map(s => s.padStart(8,'0').slice(-8));
+      roundText = `IPv4: ${ip} — shoot 8-bit binary for octet ${idx+1}`;
+      spawnAliens([correct, ...decoys], 2);
+    }
+    else if (mode === 'ipv6'){
+      const q = hexQuartet();
+      target = q.hex;
+      baseTarget = 2; // show binary 16-bit of hex quartet
+      const correct = toPaddedBinary(q.val, 16);
+      const decoys = makeDecoys(correct, 5, 2).map(s => s.padStart(16,'0').slice(-16));
+      roundText = `IPv6: 0x${q.hex} — shoot its 16-bit binary`;
+      spawnAliens([correct, ...decoys], 2);
+    }
+  }
+
+  function spawnAliens(options, base){
+    // Shuffle options
+    for (let i=options.length-1;i>0;i--){
+      const j = (Math.random()* (i+1))|0; [options[i], options[j]] = [options[j], options[i]];
+    }
+    const cols = options.length;
+    const gutter = 30, leftPad = 50, rightPad = 50;
+    const usableW = W - leftPad - rightPad;
+    const colW = usableW / cols;
+
+    aliens.length = 0;
+    const correctText = (mode==='classic') ? convertForBase(target, baseTarget)
+                         : (mode==='ipv4' ? toPaddedBinary(splitOctets(target.ip)[target.idx], 8)
+                                           : toPaddedBinary(parseInt(target,16), 16));
+
+    options.forEach((text, i) => {
+      const {w,h} = measureAlien(text);
+      const cx = leftPad + colW*i + colW/2;
+      const x = cx - w/2;
+      const y = -randInt(60, 200) - i*20; // slight stagger
+      aliens.push({ x, y, w, h, vy: waveSpeed(), text, correct: text===correctText, base });
+    });
+  }
+
+  function shoot(){
+    if (player.cooldown > 0) return;
+    player.cooldown = player.cooldownMax;
+    bullets.push({ x: player.x - 2, y: player.y - 18, w: 4, h: 14, vy: -520 });
+  }
+
+  // ---------- Input ----------
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
+    if (e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
+    if (e.key === ' '){ keys.shoot = true; shoot(); }
+    if (e.key.toLowerCase() === 'p') togglePause();
+    if (e.key.toLowerCase() === 'r') { resetGame(); startGame(); }
+    if (e.key.toLowerCase() === 'h') helpFlash = 2.5;
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+    if (e.key === ' ') keys.shoot = false;
+  });
+
+  $start.addEventListener('click', () => { if (state!=='playing'){ resetGame(); startGame(); }});
+  $pause.addEventListener('click', togglePause);
+  $restart.addEventListener('click', () => { resetGame(); startGame(); });
+  $mode.addEventListener('change', () => { if (state==='playing') newRound(); });
+
+  function togglePause(){
+    if (state === 'playing') state = 'paused';
+    else if (state === 'paused') state = 'playing';
+  }
+
+  // ---------- Update ----------
+  function update(dt){
+    if (state !== 'playing') return;
+
+    // Player
+    let vx = 0;
+    if (keys.left) vx -= player.speed;
+    if (keys.right) vx += player.speed;
+    player.x = clamp(player.x + vx*dt, player.w/2 + 10, W - player.w/2 - 10);
+    if (player.cooldown > 0){ player.cooldown -= dt; if (player.cooldown < 0) player.cooldown = 0; }
+
+    // Bullets
+    for (let i=bullets.length-1;i>=0;i--){
+      const b = bullets[i];
+      b.y += b.vy * dt;
+      if (b.y + b.h < 0) bullets.splice(i,1);
+    }
+
+    // Aliens
+    let reachedBottom = false;
+    aliens.forEach(a => { a.y += a.vy * dt; if (a.y + a.h >= H-80) reachedBottom = true; });
+
+    // Collisions
+    for (let i=aliens.length-1;i>=0;i--){
+      const a = aliens[i];
+      for (let j=bullets.length-1;j>=0;j--){
+        const b = bullets[j];
+        if (rectsOverlap(a,b)){
+          bullets.splice(j,1);
+          const wasCorrect = a.correct;
+          aliens.splice(i,1);
+          if (wasCorrect){
+            const bonus = 100 + Math.floor(level*10) + streak*10;
+            score += bonus;
+            streak++;
+            messageFlash = 0.6;
+            // Clear rest of aliens and go next round
+            aliens.length = 0;
+            setTimeout(() => nextLevel(), 150);
+          } else {
+            lives--; streak = 0; screenShake(8);
+            messageFlash = 0.0;
+            if (lives <= 0) gameOver();
+          }
+          break;
+        }
+      }
+    }
+
+    if (reachedBottom){
+      lives--; streak = 0; aliens.length = 0; screenShake(10);
+      if (lives <= 0) gameOver(); else setTimeout(() => newRound(), 250);
+    }
+  }
+
+  function rectsOverlap(a,b){
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  // ---------- Simple Screen Shake ----------
+  let shakeTime = 0, shakeMag = 0;
+  function screenShake(mag){ shakeTime = 0.25; shakeMag = mag; }
+
+  function applyShake(){
+    if (shakeTime <= 0) return {x:0,y:0};
+    shakeTime -= dt; if (shakeTime < 0) shakeTime = 0;
+    const t = Math.random()*Math.PI*2;
+    const m = shakeMag * (shakeTime/0.25);
+    return { x: Math.cos(t)*m, y: Math.sin(t)*m };
+  }
+
+  // ---------- Draw ----------
+  let helpFlash = 2.5;
+  function draw(){
+    // background starfield
+    ctx.clearRect(0,0,W,H);
+    drawStars();
+
+    // shake transform
+    ctx.save();
+    const sh = applyShake();
+    ctx.translate(sh.x, sh.y);
+
+    // HUD top
+    ctx.fillStyle = '#0a1330';
+    ctx.fillRect(0,0,W,64);
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.strokeRect(0.5,0.5,W-1,64);
+
+    ctx.fillStyle = '#9fb4ff';
+    ctx.font = '20px Consolas, Menlo, Monaco, monospace';
+    ctx.fillText(`Score: ${score}`, 16, 28);
+    ctx.fillText(`Lives: ${'❤'.repeat(lives)}`, 16, 52);
+    ctx.fillText(`Level ${level}`, W-150, 28);
+    ctx.fillText(`${modeLabel()}`, W-150, 52);
+
+    // Round prompt
+    ctx.fillStyle = '#e9eeff';
+    ctx.font = '24px Consolas, Menlo, Monaco, monospace';
+    const tw = ctx.measureText(roundText).width;
+    ctx.fillText(roundText, (W-tw)/2, 40);
+
+    // Player ship
+    drawShip(player.x, player.y);
+
+    // Bullets
+    ctx.fillStyle = '#c8e1ff';
+    bullets.forEach(b => ctx.fillRect(b.x, b.y, b.w, b.h));
+
+    // Aliens
+    aliens.forEach(a => drawAlien(a));
+
+    // Messages
+    if (messageFlash > 0){
+      messageFlash -= dt;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, messageFlash);
+      ctx.fillStyle = '#b7ffbf';
+      ctx.font = '28px Consolas, Menlo, Monaco, monospace';
+      const msg = '✔ Correct!';
+      const mW = ctx.measureText(msg).width;
+      ctx.fillText(msg, (W-mW)/2, H*0.55);
+      ctx.restore();
+    }
+
+    // Overlays for states
+    if (state === 'menu') drawCenterBox('Base Blasters', 'Press Start (or R) to begin');
+    if (state === 'paused') drawCenterBox('Paused', 'Press P to resume');
+    if (state === 'gameover') drawCenterBox('Game Over', 'Press Restart (or R)');
+
+    // Quick help hint
+    if (helpFlash > 0){
+      helpFlash -= dt;
+      ctx.save(); ctx.globalAlpha = Math.min(0.9, helpFlash);
+      ctx.fillStyle = '#d2dcff';
+      ctx.font = '16px Consolas, Menlo, Monaco, monospace';
+      const hint = 'Hint: Binary = base 2, Octal = base 8, Duo = base 12 (A=10,B=11), Hex = base 16.';
+      const w2 = ctx.measureText(hint).width;
+      ctx.fillText(hint, (W-w2)/2, H-12);
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  function modeLabel(){
+    if (mode==='classic') return 'CLASSIC';
+    if (mode==='ipv4') return 'IPv4';
+    if (mode==='ipv6') return 'IPv6';
+    return '';
+  }
+
+  function drawCenterBox(title, subtitle){
+    ctx.save();
+    const boxW = 520, boxH = 150;
+    const x = (W - boxW)/2, y = (H - boxH)/2;
+    ctx.fillStyle = 'rgba(8, 14, 40, 0.92)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 2;
+    roundRect(ctx, x, y, boxW, boxH, 16, true, true);
+    ctx.fillStyle = '#eaf0ff';
+    ctx.font = '32px Consolas, Menlo, Monaco, monospace';
+    const tw = ctx.measureText(title).width;
+    ctx.fillText(title, x + (boxW - tw)/2, y + 54);
+    ctx.fillStyle = '#a9b4c9';
+    ctx.font = '18px Consolas, Menlo, Monaco, monospace';
+    const sw = ctx.measureText(subtitle).width;
+    ctx.fillText(subtitle, x + (boxW - sw)/2, y + 94);
+    ctx.restore();
+  }
+
+  function drawShip(cx, cy){
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.fillStyle = '#7cbcff';
+    // body
+    roundRect(ctx, -player.w/2, -player.h/2, player.w, player.h, 6, true, false);
+    // cockpit
+    ctx.fillStyle = '#c7e3ff';
+    roundRect(ctx, -12, -player.h/2 - 6, 24, 14, 6, true, false);
+    // wings
+    ctx.fillStyle = '#93caff';
+    ctx.fillRect(-player.w/2 - 10, -6, 10, 8);
+    ctx.fillRect(player.w/2, -6, 10, 8);
+    ctx.restore();
+  }
+
+  function drawAlien(a){
+    ctx.save();
+    // body box
+    const baseColor = (a.base===2? '#8ef1b9' : a.base===8? '#f9d66c' : a.base===12? '#c8a3ff' : '#ff9dcf');
+    ctx.fillStyle = baseColor;
+    ctx.globalAlpha = 0.15;
+    roundRect(ctx, a.x, a.y, a.w, a.h, 8, true, false);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = baseColor;
+    ctx.lineWidth = 2;
+    roundRect(ctx, a.x, a.y, a.w, a.h, 8, false, true);
+
+    // antenna
+    ctx.beginPath();
+    ctx.moveTo(a.x + a.w/2, a.y);
+    ctx.lineTo(a.x + a.w/2, a.y - 10);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(a.x + a.w/2, a.y - 12, 3, 0, Math.PI*2);
+    ctx.fillStyle = baseColor; ctx.fill();
+
+    // text label
+    ctx.fillStyle = '#eaf0ff';
+    ctx.font = '20px Consolas, Menlo, Monaco, monospace';
+    const textW = ctx.measureText(a.text).width;
+    ctx.fillText(a.text, a.x + (a.w - textW)/2, a.y + 24);
+  }
+
+  function drawStars(){
+    // simple parallax starfield
+    const t = performance.now()/1000;
+    for (let i=0;i<120;i++){
+      const x = (i*53 % W);
+      const y = ( (i*97 + Math.floor(t*30)) % H );
+      ctx.fillStyle = i%9===0 ? '#cfe2ff' : '#9ab6ff';
+      ctx.fillRect(x, y, 2, 2);
+    }
+  }
+
+  function roundRect(ctx, x, y, w, h, r, fill, stroke){
+    if (w < 2*r) r = w/2;
+    if (h < 2*r) r = h/2;
+    ctx.beginPath();
+    ctx.moveTo(x+r, y);
+    ctx.arcTo(x+w, y, x+w, y+h, r);
+    ctx.arcTo(x+w, y+h, x, y+h, r);
+    ctx.arcTo(x, y+h, x, y, r);
+    ctx.arcTo(x, y, x+w, y, r);
+    ctx.closePath();
+    if (fill) ctx.fill();
+    if (stroke) ctx.stroke();
+  }
+
+  // ---------- Main Loop ----------
+  function loop(ts){
+    dt = (ts - last)/1000; if (dt > 0.05) dt = 0.05; last = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // ---------- Init ----------
+  resetGame();
+})();
+</script>
+</body>
+</html>
