@@ -139,7 +139,7 @@
   function gameOver(){ state='gameover'; }
   function nextLevel(){ level++; newRound(); }
 
-  function classicRange(){ if (level<4) return {min:0,max:63}; if(level<7) return {min:0,max:255}; return {min:0,max:4095}; }
+  function classicRange(){ if (level<4) return {min:0,max:16}; if(level<7) return {min:0,max:32}; return {min:0,max:64}; }
   function pickBase(){ const bases=[2,8,12,16]; return bases[(level + Math.floor(Math.random()*10)) % bases.length]; }
   function labelForBase(b){ return b===2?'BINARY':b===8?'OCTAL':b===12?'DUODECIMAL':'HEX'; }
   function convertForBase(n,b){ return b===12?toBaseDuodecimal(n):toBase(n,b); }
